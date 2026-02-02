@@ -225,6 +225,13 @@ class CameraWaypointPath extends Script {
             const duration = Math.max(distance * this.durationPerUnit, this.minDuration);
 
             const moveTween = this._createSegmentTween(currentPos, currentRot, targetPos, targetRotQuat, duration, easingFn);
+            const logPos = targetPos.clone();
+            const logRotation = new Vec3();
+            targetRotQuat.getEulerAngles(logRotation);
+            const waypointNumber = i + 1;
+            moveTween.onComplete(() => {
+                console.log(`CameraWaypointPath: waypoint ${waypointNumber}/${this.waypointPositions.length} reached at ${logPos.x.toFixed(2)},${logPos.y.toFixed(2)},${logPos.z.toFixed(2)} rotation ${logRotation.x.toFixed(1)},${logRotation.y.toFixed(1)},${logRotation.z.toFixed(1)}`);
+            });
             this._tweens.push(moveTween);
 
             const pause = this.waypointPauses[i] || 0;
