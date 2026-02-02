@@ -34,32 +34,20 @@ class CameraWaypointPath extends Script {
     };
 
     /**
-     * Waypoint positions.
-     *
-     * @attribute
-     * @title Waypoint Positions
      * @type {Vec3[]}
-     * @default []
+     * @private
      */
     waypointPositions = [];
 
     /**
-     * Waypoint rotations (Euler degrees).
-     *
-     * @attribute
-     * @title Waypoint Rotations
      * @type {Vec3[]}
-     * @default []
+     * @private
      */
     waypointRotations = [];
 
     /**
-     * Pause at each waypoint (seconds).
-     *
-     * @attribute
-     * @title Waypoint Pauses
      * @type {number[]}
-     * @default []
+     * @private
      */
     waypointPauses = [];
 
@@ -407,10 +395,11 @@ class CameraWaypointPath extends Script {
 
         let format = this.waypointDataFormat;
         if (format === 'auto') {
-            const url = sourceUrl || asset?.file?.url || '';
-            if (url.endsWith('.csv')) format = 'csv';
+            const url = (sourceUrl || asset?.file?.url || '').toLowerCase();
+            if (url.endsWith('.csv') || url.endsWith('.txt')) format = 'csv';
             else if (url.endsWith('.json')) format = 'json';
             else if (typeof data === 'string') format = 'csv';
+            else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) format = 'csv';
             else format = 'json';
         }
 
@@ -425,6 +414,10 @@ class CameraWaypointPath extends Script {
             }
         } catch (err) {
             console.warn('CameraWaypointPath: failed to parse waypoint data', err);
+        }
+
+        if (!this.waypointPositions.length) {
+            console.warn('CameraWaypointPath: no waypoints parsed from data source');
         }
 
         if (this._pendingAutoStart) {
