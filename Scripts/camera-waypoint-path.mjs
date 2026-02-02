@@ -15,11 +15,23 @@ import {
     QuinticInOut
 } from './tween.mjs';
 
+/** @typedef {import('playcanvas').Asset} asset */
+/** @typedef {import('playcanvas').Entity} entity */
+
 class CameraWaypointPath extends Script {
     static scriptName = 'cameraWaypointPath';
-
-    /** @typedef {import('playcanvas').Asset} asset */
-    /** @typedef {import('playcanvas').Entity} entity */
+    static attributes = {
+        waypointDataAsset: {
+            type: 'asset',
+            title: 'Waypoint Data Asset (CSV/Text)',
+            default: null
+        },
+        waypointDataUrl: {
+            type: 'string',
+            title: 'Waypoint Data URL',
+            default: ''
+        }
+    };
 
     /**
      * Waypoint positions.
@@ -55,11 +67,11 @@ class CameraWaypointPath extends Script {
      * Waypoint data asset (JSON or CSV).
      *
      * @attribute
-      * @title Waypoint Data Asset
-        * @type {asset}
+     * @title Waypoint Data Asset (CSV/Text)
+     * @type {asset}
+     * @resource text
      */
-    // @ts-ignore
-    waypointDataAsset;
+    waypointDataAsset = null;
 
     /**
      * Waypoint data format.
@@ -70,6 +82,16 @@ class CameraWaypointPath extends Script {
      * @default auto
      */
     waypointDataFormat = 'auto';
+
+    /**
+     * Waypoint data URL (CSV or JSON). If set, this is loaded instead of the asset.
+     *
+     * @attribute
+     * @title Waypoint Data URL
+     * @type {string}
+     * @default
+     */
+    waypointDataUrl = '';
 
     /**
      * CSV delimiter.
@@ -181,10 +203,13 @@ class CameraWaypointPath extends Script {
         this._disabledScripts = [];
 
         this._pendingAutoStart = false;
-        this._initWaypointDataAsset();
+        this._initWaypointDataUrl();
+        if (!this.waypointDataUrl) {
+            this._initWaypointDataAsset();
+        }
 
         if (this.autoStart) {
-            if (this.waypointDataAsset) {
+            if (this.waypointDataUrl || this.waypointDataAsset) {
                 this._pendingAutoStart = true;
             } else {
                 this.startPath();
@@ -360,12 +385,29 @@ class CameraWaypointPath extends Script {
         this.app.assets.load(asset);
     }
 
-    _applyWaypointData(data, asset) {
+    _initWaypointDataUrl() {
+        if (!this.waypointDataUrl) return;
+
+        const url = this.waypointDataUrl;
+        fetch(url)
+        .then((res) => {
+            if (!res.ok) {
+                throw new Error(`HTTP ${res.status}`);
+            }
+            return res.text();
+        })
+        .then((text) => this._applyWaypointData(text, null, url))
+        .catch((err) => {
+            console.warn('CameraWaypointPath: failed to load waypoint URL', url, err);
+        });
+    }
+
+    _applyWaypointData(data, asset, sourceUrl = '') {
         if (data == null) return;
 
         let format = this.waypointDataFormat;
         if (format === 'auto') {
-            const url = asset?.file?.url || '';
+            const url = sourceUrl || asset?.file?.url || '';
             if (url.endsWith('.csv')) format = 'csv';
             else if (url.endsWith('.json')) format = 'json';
             else if (typeof data === 'string') format = 'csv';
@@ -374,10 +416,11 @@ class CameraWaypointPath extends Script {
 
         try {
             if (format === 'csv') {
-                const text = typeof data === 'string' ? data : String(data);
+                const text = this._toText(data);
                 this._parseCsv(text);
             } else {
-                const json = typeof data === 'string' ? JSON.parse(data) : data;
+                const raw = typeof data === 'string' ? data : this._toText(data);
+                const json = typeof raw === 'string' ? JSON.parse(raw) : raw;
                 this._parseJson(json);
             }
         } catch (err) {
@@ -438,6 +481,17 @@ class CameraWaypointPath extends Script {
         this.waypointPositions = positions;
         this.waypointRotations = rotations;
         this.waypointPauses = pauses;
+    }
+
+    _toText(data) {
+        if (typeof data === 'string') return data;
+        if (data instanceof ArrayBuffer) {
+            return new TextDecoder('utf-8').decode(new Uint8Array(data));
+        }
+        if (ArrayBuffer.isView(data)) {
+            return new TextDecoder('utf-8').decode(data);
+        }
+        return String(data);
     }
 }
 
