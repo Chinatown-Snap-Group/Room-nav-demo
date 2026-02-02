@@ -18,6 +18,8 @@ import {
 /** @typedef {import('playcanvas').Asset} asset */
 /** @typedef {import('playcanvas').Entity} entity */
 
+const EPSILON = 1e-6;
+
 class CameraWaypointPath extends Script {
     static scriptName = 'cameraWaypointPath';
     static attributes = {
@@ -205,6 +207,9 @@ class CameraWaypointPath extends Script {
         }
     }
 
+    /* eslint-disable-next-line no-undefined */
+    _EPSILON = 1e-6;
+
     startPath() {
         if (!this.waypointPositions || this.waypointPositions.length === 0) {
             return;
@@ -214,34 +219,36 @@ class CameraWaypointPath extends Script {
         this._running = true;
         this._setInputEnabled(false);
 
+        const easingFn = this._getEasing();
         let currentPos = this.entity.getLocalPosition().clone();
         let currentRot = this.entity.getLocalRotation().clone();
-        const easingFn = this._getEasing();
 
-        for (let i = 0; i < this.waypointPositions.length; i++) {
-            const targetPos = this._toVec3(this.waypointPositions[i], currentPos);
-            const targetRotQuat = this._toQuat(this.waypointRotations[i], currentRot);
-            const distance = currentPos.distance(targetPos);
-            const duration = Math.max(distance * this.durationPerUnit, this.minDuration);
+        const segments = this._buildSegments();
+        for (let s = 0; s < segments.length; s++) {
+            const segment = segments[s];
+            const pathPoints = this._collectSegmentPoints(segment.start, segment.end, currentPos);
+            if (pathPoints.length < 2) {
+                currentPos = this._toVec3(this.waypointPositions[segment.end], currentPos);
+                currentRot = this._toQuat(this.waypointRotations[segment.end], currentRot);
+                continue;
+            }
 
-            const moveTween = this._createSegmentTween(currentPos, currentRot, targetPos, targetRotQuat, duration, easingFn);
-            const logPos = targetPos.clone();
-            const logRotation = new Vec3();
-            targetRotQuat.getEulerAngles(logRotation);
-            const waypointNumber = i + 1;
+            const totalDistance = this._chainLength(pathPoints);
+            const duration = Math.max(totalDistance * this.durationPerUnit, this.minDuration);
+            const curvePoints = this._sampleCurve(pathPoints, segment.prevPoint, segment.nextPoint, Math.max(24, Math.ceil(totalDistance * 6)));
+            const targetRotQuat = this._toQuat(this.waypointRotations[segment.end], currentRot);
+
+            const moveTween = this._createCurveTween(curvePoints, currentRot, targetRotQuat, duration, easingFn);
+            const waypointNumber = segment.end + 1;
             moveTween.onComplete(() => {
-                console.log(`CameraWaypointPath: waypoint ${waypointNumber}/${this.waypointPositions.length} reached at ${logPos.x.toFixed(2)},${logPos.y.toFixed(2)},${logPos.z.toFixed(2)} rotation ${logRotation.x.toFixed(1)},${logRotation.y.toFixed(1)},${logRotation.z.toFixed(1)}`);
+                const endPos = curvePoints[curvePoints.length - 1];
+                const eulerRot = new Vec3();
+                targetRotQuat.getEulerAngles(eulerRot);
+                console.log(`CameraWaypointPath: waypoint ${waypointNumber}/${this.waypointPositions.length} reached at ${endPos.x.toFixed(2)},${endPos.y.toFixed(2)},${endPos.z.toFixed(2)} rotation ${eulerRot.x.toFixed(1)},${eulerRot.y.toFixed(1)},${eulerRot.z.toFixed(1)}`);
             });
             this._tweens.push(moveTween);
 
-            const pause = this.waypointPauses[i] || 0;
-            if (pause > 0) {
-                const app = /** @type {any} */ (this.app);
-                const waitTween = app.tween({ t: 0 }).to({ t: 0 }, 0).delay(pause);
-                this._tweens.push(waitTween);
-            }
-
-            currentPos = targetPos.clone();
+            currentPos = curvePoints[curvePoints.length - 1].clone();
             currentRot = targetRotQuat.clone();
         }
 
@@ -313,6 +320,158 @@ class CameraWaypointPath extends Script {
             QuinticInOut
         };
         return easingMap[this.easing] || SineInOut;
+    }
+
+    _buildSegments() {
+        const positions = this.waypointPositions;
+        if (!positions.length) return [];
+        const pauses = this.waypointPauses || [];
+        const length = positions.length;
+        const stops = new Set();
+        stops.add(0);
+        stops.add(length - 1);
+        for (let i = 0; i < length; i++) {
+            if ((pauses[i] ?? 0) > 0) {
+                stops.add(i);
+            }
+        }
+        const indices = Array.from(stops).sort((a, b) => a - b);
+        const segments = [];
+        for (let i = 0; i < indices.length - 1; i++) {
+            const start = indices[i];
+            const end = indices[i + 1];
+            if (end <= start) continue;
+            const prevIndex = start > 0 ? start - 1 : null;
+            const nextIndex = end + 1 < length ? end + 1 : null;
+            const prevPoint = prevIndex !== null ? this._toVec3(positions[prevIndex], new Vec3()) : null;
+            const nextPoint = nextIndex !== null ? this._toVec3(positions[nextIndex], new Vec3()) : null;
+            segments.push({ start, end, prevPoint, nextPoint });
+        }
+        return segments;
+    }
+
+    _collectSegmentPoints(start, end, currentPos) {
+        const points = [currentPos.clone()];
+        for (let idx = start; idx <= end; idx++) {
+            points.push(this._toVec3(this.waypointPositions[idx], currentPos));
+        }
+        return points;
+    }
+
+    _chainLength(points) {
+        let distance = 0;
+        for (let i = 1; i < points.length; i++) {
+            distance += points[i].distance(points[i - 1]);
+        }
+        return distance;
+    }
+
+    _sampleCurve(points, prevPoint, nextPoint, sampleCount = 32) {
+        if (points.length < 2) return points.map((p) => p.clone());
+        const segmentLengths = [];
+        for (let i = 1; i < points.length; i++) {
+            segmentLengths.push(points[i].distance(points[i - 1]));
+        }
+        const totalLength = this._chainLength(points) || 1;
+        const extended = [];
+        const startExtra = prevPoint ?? this._extrapolate(points[0], points[1] || points[0], -2);
+        const endExtra = nextPoint ?? this._extrapolate(points[points.length - 1], points[points.length - 2] || points[points.length - 1], 2);
+        extended.push(startExtra);
+        points.forEach((point) => extended.push(point.clone()));
+        extended.push(endExtra);
+
+        const alpha = 0.7;
+        const samples = [];
+        const segments = points.length - 1;
+        for (let i = 0; i < segments; i++) {
+            const p0 = extended[i];
+            const p1 = extended[i + 1];
+            const p2 = extended[i + 2];
+            const p3 = extended[i + 3];
+            const ratio = segmentLengths[i] / totalLength;
+            const steps = Math.max(4, Math.round(sampleCount * ratio));
+            for (let j = 0; j < steps; j++) {
+                const t = j / steps;
+                samples.push(this._catmullRom(p0, p1, p2, p3, t, alpha));
+            }
+        }
+        samples.push(points[points.length - 1].clone());
+        return samples;
+    }
+
+    _catmullRom(p0, p1, p2, p3, t, alpha) {
+        const t0 = 0;
+        const t1 = this._getT(t0, p0, p1, alpha);
+        const t2 = this._getT(t1, p1, p2, alpha);
+        const t3 = this._getT(t2, p2, p3, alpha);
+
+        const tt = t1 + (t2 - t1) * t;
+
+        const A1 = this._lerpVec3(p0, p1, this._safeDivide(tt - t0, t1 - t0));
+        const A2 = this._lerpVec3(p1, p2, this._safeDivide(tt - t1, t2 - t1));
+        const A3 = this._lerpVec3(p2, p3, this._safeDivide(tt - t2, t3 - t2));
+
+        const B1 = this._lerpVec3(A1, A2, this._safeDivide(tt - t0, t2 - t0));
+        const B2 = this._lerpVec3(A2, A3, this._safeDivide(tt - t1, t3 - t1));
+
+        return this._lerpVec3(B1, B2, this._safeDivide(tt - t1, t2 - t1));
+    }
+
+    _getT(ti, p, q, alpha) {
+        const distance = p.distance(q);
+        return ti + Math.pow(Math.max(distance, 1e-4), alpha);
+    }
+
+    _lerpVec3(a, b, t) {
+        const v = new Vec3();
+        const alpha = Math.min(Math.max(t, 0), 1);
+        v.lerp(a, b, alpha);
+        return v;
+    }
+
+    _safeDivide(numerator, divisor) {
+        if (Math.abs(divisor) < 1e-6) {
+            return 0;
+        }
+        return numerator / divisor;
+    }
+
+    _extrapolate(point, reference, lengthFactor) {
+        const dir = point.clone().sub(reference);
+        if (dir.lengthSq() < EPSILON) {
+            dir.set(0, 0, 1);
+        }
+        dir.normalize().mulScalar(lengthFactor);
+        return point.clone().add(dir);
+    }
+
+    _createCurveTween(curvePoints, fromRot, toRot, duration, easingFn) {
+        const state = { t: 0 };
+        const pos = new Vec3();
+        const rot = new Quat();
+        const app = /** @type {any} */ (this.app);
+        if (curvePoints.length === 0) {
+            const tween = app.tween(state).to({ t: 1 }, duration, easingFn);
+            tween.onUpdate(() => {
+                this.entity.setLocalRotation(toRot);
+            });
+            return tween;
+        }
+        const totalSegments = curvePoints.length - 1;
+        const tween = app.tween(state).to({ t: 1 }, duration, easingFn);
+        tween.onUpdate(() => {
+            const scaled = Math.min(state.t, 1) * totalSegments;
+            const index = Math.floor(scaled);
+            const blend = scaled - index;
+            const from = curvePoints[index];
+            const to = curvePoints[Math.min(index + 1, totalSegments)];
+            pos.lerp(from, to, blend);
+            rot.slerp(fromRot, toRot, state.t);
+            this.entity.setLocalPosition(pos);
+            this.entity.setLocalRotation(rot);
+        });
+
+        return tween;
     }
 
     _toVec3(value, fallback) {
